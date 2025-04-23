@@ -30,7 +30,24 @@ from webdriver_manager.core.os_manager import OperationSystemManager,ChromeType
 # Setup path for importing project modules
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.append(project_root)
+# Paths and constants
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, 'data.json')
+PROXY = "localhost:8080"
+ADDON_SCRIPT = os.path.join(BASE_DIR, "mitmproxy_addon.py")
+LOG_FILE = os.path.join(BASE_DIR, 'wellfound_logs.log')
+# Setup logging
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ] 
+)
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 # Configure Django settings if available
 try:
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'jobs_scraper.settings')
@@ -48,20 +65,39 @@ except:
     username = credentials.get('username', '')
     password = credentials.get('password', '')
 
-# Try to initialize display for headless environments
-try:
-    display = Display(visible=0, size=(1920, 1080), use_xauth=True)
-    display.start()
-    import pyautogui
-except:
-    pass
+# Handle display and GUI optional dependencies
+# These might not be available in all environments and we'll provide fallbacks
+DISPLAY_AVAILABLE = False
+PYAUTOGUI_AVAILABLE = False
 
-# Paths and constants
-BASE_DIR = os.path.dirname(os.path.realpath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, 'data.json')
-PROXY = "localhost:8080"
-ADDON_SCRIPT = os.path.join(BASE_DIR, "mitmproxy_addon.py")
-LOG_FILE = os.path.join(BASE_DIR, 'wellfound_logs.log')
+# Only attempt to initialize these if explicitly requested
+def init_display_and_gui(force=False):
+    global DISPLAY_AVAILABLE, PYAUTOGUI_AVAILABLE, display
+    
+    if force:
+        try:
+            display = Display(visible=0, size=(1920, 1080), use_xauth=True)
+            display.start()
+            DISPLAY_AVAILABLE = True
+            logger.info("Virtual display initialized successfully")
+        except Exception as e:
+            logger.info(f"Unable to start virtual display: {e}")
+            DISPLAY_AVAILABLE = False
+
+        # Only attempt PyAutoGUI if display is available
+        if DISPLAY_AVAILABLE:
+            try:
+                import pyautogui
+                PYAUTOGUI_AVAILABLE = True
+                logger.info("PyAutoGUI loaded successfully")
+            except ImportError as e:
+                logger.warning(f"PyAutoGUI not available: {e}")
+                PYAUTOGUI_AVAILABLE = False
+
+# Initialize lazy loading attributes
+display = None
+
+
 
 # Default to output in project root if custom path not available
 try:
@@ -73,18 +109,7 @@ except:
 
 CREDENTIALS_FILE = os.path.join(BASE_DIR, 'wellfound_credentials.txt')
 
-# Setup logging
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ] 
-)
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 # Global data containers
 all_statups = {}
@@ -97,7 +122,21 @@ def delay_range():
 
 def random_click(image_path, confidence=0.8):
     """Perform a random click near the center of an image match."""
+    # Skip if PyAutoGUI isn't available
+    global PYAUTOGUI_AVAILABLE
+    
+    if not PYAUTOGUI_AVAILABLE:
+        logger.info("Skipping random_click as PyAutoGUI is not available")
+        return
+    
+    # Lazy load PyAutoGUI only when needed
     try:
+        import pyautogui
+        
+        if not os.path.exists(image_path):
+            logger.info(f"Image not found at path: {image_path}")
+            return
+            
         location = pyautogui.locateOnScreen(image_path, confidence=confidence)
         if location:
             offset = int(location.width * 0.1)
@@ -107,9 +146,10 @@ def random_click(image_path, confidence=0.8):
             pyautogui.moveTo(random_x, random_y, duration=random.uniform(0.1, 1.0))
             pyautogui.click()
         else:
-            logger.info("Image not found.")
+            logger.info("Image not found on screen.")
     except Exception as e:
         logger.info(f"Error during random click: {e}")
+        PYAUTOGUI_AVAILABLE = False  # Disable for subsequent attempts
     
 @browser(proxy=f"http://{PROXY}", add_arguments=['--no-sandbox', '--ignore-certificate-errors'])
 def scrape_heading_task(driver: Driver, data):
@@ -489,18 +529,31 @@ def run_wellfound_scraper(headless=False, output_file=None, use_proxy=True):
     
     logger.info("Starting Wellfound scraper...")
     
+    # Only initialize display if not in headless mode
+    if not headless:
+        init_display_and_gui(force=True)
+    
     stop_event = threading.Event()  # Event to stop Mitmproxy monitoring
     
     try:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(OUTPUT_FILE)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
         # Start mitmproxy
         if use_proxy:
             logger.info("Starting Mitmproxy...")
-            mitm_process = start_mitmproxy()
-            
-            # Start Mitmproxy monitoring in a separate thread
-            monitor_thread = threading.Thread(target=monitor_mitmproxy, args=(mitm_process, stop_event))
-            monitor_thread.daemon = True
-            monitor_thread.start()
+            try:
+                mitm_process = start_mitmproxy()
+                
+                # Start Mitmproxy monitoring in a separate thread
+                monitor_thread = threading.Thread(target=monitor_mitmproxy, args=(mitm_process, stop_event))
+                monitor_thread.daemon = True
+                monitor_thread.start()
+            except FileNotFoundError:
+                logger.error("Mitmproxy not found. Please install mitmproxy using 'pip install mitmproxy'")
+                return False
         
         # Start the scraping task
         logger.info("Starting scraping task...")
@@ -515,17 +568,19 @@ def run_wellfound_scraper(headless=False, output_file=None, use_proxy=True):
         
     finally:
         # Stop Mitmproxy if it was started
-        if use_proxy:
+        if use_proxy and 'stop_event' in locals():
             stop_event.set()
             if 'monitor_thread' in locals():
                 monitor_thread.join(timeout=5)
         
         # Clean up display if it was started
-        try:
-            if 'display' in globals():
+        global display, DISPLAY_AVAILABLE
+        if display is not None and DISPLAY_AVAILABLE:
+            try:
                 display.stop()
-        except:
-            pass
+                logger.info("Virtual display stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping virtual display: {e}")
             
         logger.info("Wellfound scraper finished.")
         

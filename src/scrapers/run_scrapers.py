@@ -30,9 +30,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Import scrapers
-from src.scrapers.jobright.scraper import run_jobright_scraper
-from src.scrapers.wellfound.scraper import run_wellfound_scraper
+# We'll import scrapers conditionally to avoid dependency issues
 
 def setup_argparse():
     """Set up command line argument parsing."""
@@ -69,6 +67,20 @@ def main():
         parser.print_help()
         print("\nError: Please specify at least one scraper to run (--all, --jobright, or --wellfound)")
         return 1
+        
+    # Check for X11 dependencies if Wellfound is requested
+    if run_wellfound:
+        try:
+            # Check for Xvfb
+            if os.system("which Xvfb >/dev/null 2>&1") != 0:
+                logger.warning("Xvfb not found. The Wellfound scraper may have issues in a headless environment.")
+                
+            # Check for .Xauthority
+            xauth_path = os.path.expanduser("~/.Xauthority")
+            if not os.path.exists(xauth_path):
+                logger.warning(f"{xauth_path} not found. The Wellfound scraper may have issues with X11 authentication.")
+        except Exception as e:
+            logger.warning(f"Error checking X11 dependencies: {e}")
     
     # Set up output files
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
@@ -99,19 +111,33 @@ def main():
     
     if run_jobright:
         logger.info("Running JobRight scraper...")
-        output_file = os.path.join(output_dir, f'jobright_results_{timestamp}.xlsx')
-        success = run_jobright_scraper(headless=args.headless, output_file=output_file)
-        results.append(("JobRight", success, output_file if success else None))
+        try:
+            # Import only when needed
+            from src.scrapers.jobright.scraper import run_jobright_scraper
+            
+            output_file = os.path.join(output_dir, f'jobright_results_{timestamp}.xlsx')
+            success = run_jobright_scraper(headless=args.headless, output_file=output_file)
+            results.append(("JobRight", success, output_file if success else None))
+        except Exception as e:
+            logger.error(f"Error running JobRight scraper: {e}")
+            results.append(("JobRight", False, None))
     
     if run_wellfound:
         logger.info("Running Wellfound scraper...")
-        output_file = os.path.join(output_dir, f'wellfound_results_{timestamp}.xlsx')
-        success = run_wellfound_scraper(
-            headless=args.headless, 
-            output_file=output_file,
-            use_proxy=not args.no_proxy
-        )
-        results.append(("Wellfound", success, output_file if success else None))
+        try:
+            # Import only when needed
+            from src.scrapers.wellfound.scraper import run_wellfound_scraper
+            
+            output_file = os.path.join(output_dir, f'wellfound_results_{timestamp}.xlsx')
+            success = run_wellfound_scraper(
+                headless=args.headless, 
+                output_file=output_file,
+                use_proxy=not args.no_proxy
+            )
+            results.append(("Wellfound", success, output_file if success else None))
+        except Exception as e:
+            logger.error(f"Error running Wellfound scraper: {e}")
+            results.append(("Wellfound", False, None))
     
     # Print summary
     logger.info("\nScraper Summary:")

@@ -27,24 +27,18 @@ from webdriver_manager.core.os_manager import OperationSystemManager,ChromeType
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.append(project_root)
 
+# Import core utilities
+from src.scrapers.core.logger import get_logger
+from src.scrapers.core.data_handler import save_to_excel
+from src.config.config import config
+
 # Paths and constants
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 LOG_FILE = os.path.join(BASE_DIR, 'jobright_logs.log')
 OUTPUT_FILE = os.path.join(project_root, 'output', f'jobright_results_{datetime.now().strftime("%Y-%m-%d-%H-%M")}.xlsx')
-CREDENTIALS_FILE = os.path.join(project_root, 'config', 'credentials.json')
 
-# Setup logging
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ] 
-)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# Get logger with core utility
+logger = get_logger(__name__, log_dir=os.path.join(project_root, 'logs'))
 
 def get_creds():
     """
@@ -54,17 +48,11 @@ def get_creds():
         dict: Dictionary with login credentials
     """
     try:
-        # Try to load from config.json first (new structure)
-        if os.path.exists(CREDENTIALS_FILE):
-            try:
-                import json
-                with open(CREDENTIALS_FILE, 'r') as file:
-                    config_data = json.load(file)
-                    if 'jobright' in config_data:
-                        return config_data['jobright']
-            except Exception as e:
-                logger.error(f'Cannot load credentials from {CREDENTIALS_FILE}: {e}')
-        
+        # Use core config utility to get credentials
+        credentials = config.get_credentials('jobright')
+        if credentials and 'username' in credentials and 'password' in credentials:
+            return credentials
+            
         # Fallback to legacy credentials.txt in project root
         legacy_creds_file = os.path.join(project_root, 'credentials.txt')
         if os.path.exists(legacy_creds_file):
@@ -75,7 +63,7 @@ def get_creds():
                     credentials[key] = value
             return credentials
             
-        logger.error(f'Cannot find credentials file')
+        logger.error(f'Cannot find valid credentials')
         sys.exit()
     except Exception as e:
         logger.error(f'Cannot get credentials, error: {e}')
@@ -94,6 +82,13 @@ def start_browser():
         chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
         capabilities = DesiredCapabilities.CHROME
         capabilities['goog:loggingPrefs'] = {'performance': 'ALL'}
+        
+        # Add common options for better compatibility
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-gpu')
+        # Attempt to fix DNS issues
+        chrome_options.add_argument('--dns-prefetch-disable')
         
         # Check if we're running in WSL or Linux
         is_wsl = 'WSL' in os.uname().release if hasattr(os, 'uname') else False
@@ -194,14 +189,10 @@ def save_result(data):
         data: Dictionary of job data to save
     """
     try:
-        df = pd.DataFrame(data)
-        if os.path.exists(OUTPUT_FILE):
-            with pd.ExcelWriter(OUTPUT_FILE, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
-                df.to_excel(writer, index=False, header=False, sheet_name='Sheet1', startrow=writer.sheets['Sheet1'].max_row)
-        else:
-            df.to_excel(OUTPUT_FILE, index=False, sheet_name='Sheet1')
+        # Use core data handler utility to save data
+        save_to_excel(data, output_file=OUTPUT_FILE, prefix='jobright_results')
     except Exception as e:
-        logger.error(f'Something went wrond during writing to file, error: {e}')
+        logger.error(f'Something went wrong during writing to file, error: {e}')
 
 def capture_responses(driver):
     """
@@ -252,7 +243,6 @@ def capture_responses(driver):
                                     'Inustry': [';'.join([x.get('displayName', '') for x in job_set['industryMatchingScores'][:2]])],
                                     'Tags': [';'.join(job_set.get('recommendationTags', ''))],
                                     'Responsibilities': [';'.join(job_set.get('coreResponsibilities', ''))],
-                                    'Responsibilities': [';'.join(job_set.get('coreRessource venv/bin/activateponsibilities', ''))],
                                     'Connection name': [job_set['socialConnections'][0].get('fullName', '') if job_set['socialConnections'] else ''],
                                     'Connection company name': [job_set['socialConnections'][0].get('companyName', '') if job_set['socialConnections'] else ''],
                                     'Connection job title': [job_set['socialConnections'][0].get('jobTitle', '') if job_set['socialConnections'] else ''],
@@ -260,68 +250,81 @@ def capture_responses(driver):
                                     }
                                 save_result(data)
                             except Exception as e:
-                                logger.error(f'Something went wrong during collecting job data: {e}')
-            return True
+                                logger.error(f'Something went wrong during collecting of data from {url}, error: {e}')
+            break
         except Exception as e:
-            logger.error(f'Something went wrong during capturing responses: {e}')
-            return False
+            logger.error(f'Something went wrong during collecting of data, error: {e}')
+            logger.error(f'Making another attempt #{n+1}...')
+    
+    if responses:
+        logger.info(f'Some results found, trying to move to next page ...')
+        return True            
+    else:
+        logger.info(f'No new results detected after attempt to move to next page, extraction completed.')
+        return False
     
 def collect_data():
     """
     Main function to execute the scraping process.
     """
     try:
-        # Get credentials
+        logger.info(f'Getting login/password from file ...')
         credentials = get_creds()
         
-        # Start the browser
+        logger.info(f'Starting browser ...')
         driver = start_browser()
+        driver.execute_cdp_cmd("Network.enable", {})
+        wait = WebDriverWait(driver, 30)
         
-        try:
-            # Attempt login
-            driver.get('https://app.jobright.ai/user/login')
-            
-            # Wait for login form
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "email"))
-            )
-            
-            # Enter credentials
-            driver.find_element(By.ID, "email").send_keys(credentials.get('username', credentials.get('login', '')))
-            driver.find_element(By.ID, "password").send_keys(credentials.get('password', credentials.get('pass', '')))
-            driver.find_element(By.XPATH, "//button[@type='submit']").click()
-            
-            # Wait for successful login
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//div[@class='dashboard-content']"))
-            )
-            
-            logger.info('Login successful')
-            
-            # Check for popups
-            check_popups(driver)
-            
-            # Navigate to jobs page
-            driver.get('https://app.jobright.ai/jobs')
-            time.sleep(5)
-            
-            # Capture job data
-            capture_responses(driver)
-            
-            logger.info('Scraping completed successfully')
-            return True
-            
-        except Exception as e:
-            logger.error(f'Error during scraping: {e}')
-            return False
-            
-        finally:
-            # Close the browser
-            stop_browser(driver)
+        logger.info(f'Moving to https://jobright.ai/...')
+        driver.get('https://jobright.ai/')
+
+        logger.info(f'Trying to login ...')
+        wait.until(EC.visibility_of_element_located((By.XPATH, '//*[text()="SIGN IN"]'))).click()
+        time.sleep(3)    
+        driver.find_element(By.XPATH, '//input[@id="basic_email"]').send_keys(credentials.get('username', credentials.get('login', '')))
+        time.sleep(1)
+        driver.find_element(By.XPATH, '//input[@id="basic_password"]').send_keys(credentials.get('password', credentials.get('pass', '')))
+        time.sleep(1)
+        wait.until(EC.visibility_of_element_located((By.XPATH, '//button[@type="submit" and .//*[contains(text(), "SIGN")]]'))).click()
+
+        logger.info(f'Checking if any popups appear ...')
+        check_popups(driver)
+
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        
+        # Wait for job listings to appear
+        wait.until(EC.visibility_of_element_located((By.XPATH, '//ul[@class="ant-list-items"]/div')))
+        logger.info(f'Collecting data from jobs feed ...')
+        capture_responses(driver)
+
+        # Implement infinite scrolling to get more jobs
+        for i in range(1000):
+            try:
+                element = driver.find_elements(By.XPATH, '//ul[@class="ant-list-items"]/div')
+                driver.execute_script("arguments[0].scrollIntoView({ behavior: 'smooth', block: 'center' });", element[-1])
+                wait.until(EC.visibility_of_element_located((By.XPATH, '//ul[@class="ant-list-items"]/div')))
+                if not capture_responses(driver):
+                    break
+            except Exception as e:
+                logger.error(f'Error during scrolling: {e}')
+                pass
+
+        if os.path.isfile(OUTPUT_FILE):
+            logger.info(f"Collected data saved to {OUTPUT_FILE}")
+        
+        logger.info('Scraping completed successfully')
+        return True
             
     except Exception as e:
         logger.error(f'Error in collect_data: {e}')
         return False
+    finally:
+        # Close the browser
+        try:
+            stop_browser(driver)
+        except:
+            pass
 
 
 def run_jobright_scraper(headless=False, output_file=None):
@@ -341,6 +344,15 @@ def run_jobright_scraper(headless=False, output_file=None):
         OUTPUT_FILE = output_file
         
     logger.info("Starting JobRight scraper...")
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(OUTPUT_FILE)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Set headless mode if specified
+    if headless:
+        logger.info("Running in headless mode")
     
     # Run the scraper
     success = collect_data()
