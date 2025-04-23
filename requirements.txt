@@ -1,0 +1,27 @@
+# Core dependencies
+pandas>=2.2.0
+selenium>=4.26.0
+undetected-chromedriver>=3.5.0
+webdriver-manager>=4.0.0
+openpyxl>=3.1.0
+requests>=2.32.0
+python-dotenv>=1.0.0
+configparser>=6.0.0
+
+# Wellfound specific dependencies
+mitmproxy>=10.0.0
+botasaurus>=0.4.0
+pyvirtualdisplay>=3.0
+PyAutoGUI>=0.9.54  # Used in Wellfound scraper for random_click function
+
+# Django integration support (optional, only if connecting to Django models)
+django>=4.2.0
+
+# Test dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+unittest2>=1.1.0
+
+# Development dependencies
+black>=24.3.0  # Code formatting
+flake8>=7.0.0  # Linting

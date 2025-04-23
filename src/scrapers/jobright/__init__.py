@@ -1,0 +1,1 @@
+# JobRight scraper package initialization

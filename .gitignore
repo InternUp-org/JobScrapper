@@ -1,0 +1,12 @@
+.idea
+.pytest_cache
+__pycache__
+.venv
+logs
+output
+src\scrapers\wellfound\wellfound_logs.log
+wellfound_files
+cleanup.py
+credentials.txt
+jobright_logs.log
+jobright.py

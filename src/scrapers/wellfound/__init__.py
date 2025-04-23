@@ -1,0 +1,1 @@
+# Wellfound scraper package initialization
